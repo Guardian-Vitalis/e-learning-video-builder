@@ -1,0 +1,545 @@
+import http from "node:http";
+import path from "node:path";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
+import { PrepCache, buildPrepKey } from "./prepCache.js";
+import { getDoctorHealth } from "./doctorHealth.js";
+import { loadEnvForDoctor } from "./doctorEnv.js";
+import { SAMPLE_MP4_BASE64 } from "./sampleMp4Base64.js";
+import { runMuseTalkClip } from "./musetalkRunner.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const packageRoot = path.resolve(path.dirname(__filename), "..");
+const repoRoot = path.resolve(packageRoot, "..");
+const { env: runtimeEnv } = loadEnvForDoctor({
+  repoRoot,
+  packageRoot,
+  baseEnv: { ...process.env }
+});
+
+const PORT = Number(runtimeEnv.EVB_LOCAL_AVATAR_PORT || 5600);
+
+const CACHE_DIR = runtimeEnv.EVB_LOCAL_AVATAR_CACHE_DIR
+  ? path.resolve(runtimeEnv.EVB_LOCAL_AVATAR_CACHE_DIR)
+  : path.resolve(process.cwd(), "data", "local-avatar-cache");
+
+const WORK_ROOT = runtimeEnv.EVB_LOCAL_AVATAR_WORK_DIR
+  ? path.resolve(runtimeEnv.EVB_LOCAL_AVATAR_WORK_DIR)
+  : path.resolve(process.cwd(), "data", "local-avatar-work");
+
+const IMPL = (runtimeEnv.EVB_LOCAL_AVATAR_IMPL || "stub").toLowerCase();
+
+const MUSETALK_REPO_DIR = runtimeEnv.EVB_MUSETALK_REPO_DIR;
+const MUSETALK_PYTHON = runtimeEnv.EVB_MUSETALK_PYTHON || "python";
+const MUSETALK_VERSION = runtimeEnv.EVB_MUSETALK_VERSION || "v15";
+
+const MUSETALK_MODELS_DIR =
+  runtimeEnv.EVB_MUSETALK_MODELS_DIR ||
+  (MUSETALK_REPO_DIR ? path.join(MUSETALK_REPO_DIR, "models") : undefined);
+
+const MUSETALK_FFMPEG_PATH = runtimeEnv.EVB_MUSETALK_FFMPEG_PATH;
+const MUSETALK_TIMEOUT_MS = Number(runtimeEnv.EVB_MUSETALK_TIMEOUT_MS || 120000);
+
+const MAX_JSON_BYTES = Number(
+  runtimeEnv.EVB_LOCAL_AVATAR_MAX_JSON_BYTES || 50 * 1024 * 1024
+);
+
+// IMPORTANT: use real conda.exe on Windows
+const CONDA_EXE = runtimeEnv.EVB_CONDA_EXE || process.env.CONDA_EXE || "conda";
+
+// Self-test config
+const HEALTH_ENV_NAME = runtimeEnv.EVB_LOCAL_AVATAR_CONDA_ENV || "MuseTalk";
+const SELFTEST_TIMEOUT_MS = Number(
+  runtimeEnv.EVB_LOCAL_AVATAR_SELFTEST_TIMEOUT_MS || 180000
+);
+
+const cache = new PrepCache({ cacheDir: CACHE_DIR });
+const jobs = new Map();
+const jobQueue = [];
+let queueRunning = false;
+
+function setCorsHeaders(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
+function respondJson(res, statusCode, body) {
+  res.statusCode = statusCode;
+  setCorsHeaders(res);
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.end(JSON.stringify(body));
+}
+
+async function readJson(req) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (Number.isFinite(MAX_JSON_BYTES) && total > MAX_JSON_BYTES) {
+      throw new Error("payload_too_large");
+    }
+    chunks.push(chunk);
+  }
+  const raw = Buffer.concat(chunks).toString("utf8");
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error("invalid_json");
+  }
+}
+
+function jobKey(jobId, clipId) {
+  return `${jobId}:${clipId}`;
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function validateMuseTalkEnv() {
+  const missing = [];
+  if (!MUSETALK_REPO_DIR && !MUSETALK_MODELS_DIR) {
+    missing.push("EVB_MUSETALK_REPO_DIR or EVB_MUSETALK_MODELS_DIR");
+  }
+  if (missing.length === 0) return { ok: true };
+  return { ok: false, missing };
+}
+
+function runCmdCaptureJson(exe, args, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(exe, args, {
+      windowsHide: true,
+      shell: false
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill();
+      } catch {}
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`${exe} timed out`));
+        return;
+      }
+      resolve({
+        code,
+        stdout: stdout.trim(),
+        stderr: stderr.trim()
+      });
+    });
+  });
+}
+
+function runCondaJson(args, timeoutMs) {
+  return runCmdCaptureJson(CONDA_EXE, args, timeoutMs);
+}
+
+function buildSelfTestScript() {
+  return [
+    "import json, importlib, sys",
+    "mods = ['torch','diffusers','transformers','huggingface_hub','mmcv','mmpose','mmdet']",
+    "versions = {}",
+    "missing = []",
+    "for name in mods:",
+    "    try:",
+    "        mod = importlib.import_module(name)",
+    "        versions[name] = getattr(mod, '__version__', 'unknown')",
+    "    except Exception as e:",
+    "        missing.append(f\"{name}: {e}\")",
+    "if missing:",
+    "    print(json.dumps({'ok': False, 'error': 'import_failed', 'detail': '; '.join(missing)}))",
+    "    sys.exit(1)",
+    "print(json.dumps({'ok': True, 'versions': versions}))"
+  ].join("\n");
+}
+
+async function runSelfTest() {
+  const script = buildSelfTestScript();
+
+  // Preferred path: run env python directly (fast, avoids conda wrappers)
+  const py = MUSETALK_PYTHON;
+  const looksLikePath = typeof py === "string" && (py.includes("\\") || py.includes("/"));
+  const pyExists = looksLikePath && fs.existsSync(py);
+
+  if (pyExists) {
+    try {
+      const { code, stdout, stderr } = await runCmdCaptureJson(
+        py,
+        ["-c", script],
+        SELFTEST_TIMEOUT_MS
+      );
+
+      if (stdout) {
+        const parsed = JSON.parse(stdout);
+        if (parsed?.ok === true) return { ok: true, versions: parsed.versions ?? {} };
+        if (parsed?.ok === false) {
+          return { ok: false, error: parsed.error ?? "import_failed", detail: parsed.detail ?? stderr };
+        }
+      }
+
+      if (code === 0) return { ok: true, versions: {} };
+      return { ok: false, error: "python_self_test_failed", detail: stderr || stdout || "python failed" };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        error: "python_unavailable",
+        detail: message,
+        hint: "EVB_MUSETALK_PYTHON points to a file that exists, but could not be executed."
+      };
+    }
+  }
+
+  // Fallback path: conda.exe run (requires real conda.exe)
+  try {
+    const { code, stdout, stderr } = await runCondaJson(
+      ["run", "-n", HEALTH_ENV_NAME, "python", "-c", script],
+      SELFTEST_TIMEOUT_MS
+    );
+
+    if (stdout) {
+      const parsed = JSON.parse(stdout);
+      if (parsed?.ok === true) return { ok: true, versions: parsed.versions ?? {} };
+      if (parsed?.ok === false) {
+        return { ok: false, error: parsed.error ?? "import_failed", detail: parsed.detail ?? stderr };
+      }
+    }
+
+    if (code === 0) return { ok: true, versions: {} };
+    return { ok: false, error: "conda_self_test_failed", detail: stderr || stdout || "conda failed" };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: "conda_unavailable",
+      detail: message,
+      hint:
+        "Set EVB_CONDA_EXE to a real conda.exe path and/or increase EVB_LOCAL_AVATAR_SELFTEST_TIMEOUT_MS. " +
+        "On Windows, do not rely on the PowerShell 'conda' function."
+    };
+  }
+}
+
+async function runQueuedJob(input) {
+  const key = jobKey(input.jobId, input.clipId);
+  const entry = jobs.get(key);
+  if (!entry) return;
+
+  try {
+    await runJob(input);
+  } catch (err) {
+    entry.status = "failed";
+    entry.updatedAt = nowIso();
+    entry.error = err instanceof Error ? err.message : String(err);
+  }
+}
+
+function startQueue() {
+  if (queueRunning) return;
+  queueRunning = true;
+
+  const loop = async () => {
+    while (jobQueue.length > 0) {
+      const input = jobQueue.shift();
+      if (!input) continue;
+      await runQueuedJob(input);
+    }
+    queueRunning = false;
+  };
+
+  loop().catch(() => {
+    queueRunning = false;
+  });
+}
+
+async function simulatePrepare({ preparedDir }) {
+  const marker = path.join(preparedDir, "prepared.txt");
+  await import("node:fs/promises").then(({ writeFile }) =>
+    writeFile(marker, `prepared ${nowIso()}\n`, "utf8")
+  );
+}
+
+async function runJob(input) {
+  const key = jobKey(input.jobId, input.clipId);
+  const record = jobs.get(key);
+  if (!record) return;
+
+  record.status = "running";
+  record.updatedAt = nowIso();
+
+  const force =
+    input.preparationHint === "force" ||
+    input.preparationHint === "force_prepare";
+
+  const defaultFps = IMPL === "musetalk" ? 25 : 30;
+  const fps = Number.isFinite(input.fps) ? input.fps : defaultFps;
+  const bboxShift = Number.isFinite(input.bboxShift) ? input.bboxShift : 0;
+
+  const prepKey =
+    record.prepKey ??
+    buildPrepKey({
+      avatarId: input.avatarId,
+      imagePngBase64: input.imagePngBase64,
+      fps,
+      bboxShift
+    });
+
+  record.prepKey = prepKey;
+
+  const existedBefore = cache.has(prepKey);
+  record.cacheHit = existedBefore && !force;
+
+  const audioBase64 = input.audioWavBase64 ?? input.audioBase64;
+
+  const baseMeta = {
+    prepKey,
+    fps,
+    bboxShift,
+    avatarId: input.avatarId
+  };
+
+  if (IMPL === "musetalk") {
+    const existingEntry = cache.getEntry(prepKey);
+    const preparedDir = existingEntry?.preparedDir;
+
+    const result = await runMuseTalkClip({
+      repoDir: MUSETALK_REPO_DIR,
+      pythonBin: MUSETALK_PYTHON,
+      version: MUSETALK_VERSION,
+      modelsDir: MUSETALK_MODELS_DIR,
+      ffmpegPath: MUSETALK_FFMPEG_PATH,
+      avatarId: input.avatarId,
+      imagePngBase64: input.imagePngBase64,
+      audioWavBase64: audioBase64,
+      fps,
+      bboxShift,
+      preparationHint: force ? "force" : input.preparationHint,
+      timeoutMs: MUSETALK_TIMEOUT_MS,
+      workRoot: WORK_ROOT,
+      preparedDir
+    });
+
+    cache.recordEntry({
+      key: prepKey,
+      preparedDir: result.preparedDir,
+      fps,
+      bboxShift
+    });
+
+    record.meta = { ...baseMeta, cacheHit: record.cacheHit };
+    record.status = "succeeded";
+    record.updatedAt = nowIso();
+    record.artifacts = {
+      mp4Base64: result.mp4Buffer.toString("base64"),
+      durationMs: 1200
+    };
+    return;
+  }
+
+  const { entry } = await cache.getOrPrepare({
+    key: prepKey,
+    fps,
+    bboxShift,
+    force,
+    prepareFn: simulatePrepare
+  });
+
+  record.meta = { ...baseMeta, cacheHit: record.cacheHit };
+  record.status = "succeeded";
+  record.updatedAt = nowIso();
+  record.artifacts = {
+    mp4Base64: SAMPLE_MP4_BASE64,
+    durationMs: 1200,
+    preparedDir: entry.preparedDir
+  };
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+
+    if (req.method === "OPTIONS") {
+      return respondJson(res, 200, {});
+    }
+
+    if (req.method === "GET" && url.pathname === "/health") {
+      return respondJson(res, 200, { ok: true, name: "musetalk", version: "local" });
+    }
+
+    if (req.method === "GET" && url.pathname === "/health/details") {
+      const details = await getDoctorHealth({ cache, envBase: runtimeEnv });
+      return respondJson(res, 200, details);
+    }
+
+    if (req.method === "GET" && url.pathname === "/health/local-avatar") {
+      const selfTest = await runSelfTest();
+      const details = await getDoctorHealth({ cache, envBase: runtimeEnv });
+      const actionItems = selfTest.ok ? [] : details.actionItems ?? [];
+      const selfTestPayload = selfTest.ok
+        ? { ok: true, versions: selfTest.versions ?? {} }
+        : selfTest;
+
+      return respondJson(res, 200, {
+        ...details,
+        ok: selfTest.ok,
+        actionItems,
+        versions: selfTest.ok ? selfTest.versions : undefined,
+        selfTest: selfTestPayload,
+        error: selfTest.ok ? undefined : selfTest.error,
+        detail: selfTest.ok ? undefined : selfTest.detail,
+        hint: selfTest.ok ? undefined : selfTest.hint
+      });
+    }
+
+    if (req.method === "POST" && url.pathname === "/v1/jobs") {
+      const contentLength = Number(req.headers["content-length"] ?? 0);
+      if (Number.isFinite(MAX_JSON_BYTES) && contentLength > MAX_JSON_BYTES) {
+        return respondJson(res, 413, {
+          error: "payload_too_large",
+          message: `Request body exceeds ${MAX_JSON_BYTES} bytes.`
+        });
+      }
+
+      let body;
+      try {
+        body = await readJson(req);
+      } catch (err) {
+        if (err instanceof Error && err.message === "payload_too_large") {
+          return respondJson(res, 413, {
+            error: "payload_too_large",
+            message: `Request body exceeds ${MAX_JSON_BYTES} bytes.`
+          });
+        }
+        if (err instanceof Error && err.message === "invalid_json") {
+          return respondJson(res, 400, { error: "invalid_json" });
+        }
+        throw err;
+      }
+
+      if (!body || !body.jobId || !body.clipId || !body.imagePngBase64) {
+        return respondJson(res, 400, { error: "invalid_request" });
+      }
+
+      if (IMPL === "musetalk") {
+        const check = validateMuseTalkEnv();
+        if (!check.ok) {
+          return respondJson(res, 400, {
+            error: "missing_env",
+            message: `MuseTalk config missing: ${check.missing.join(", ")}`
+          });
+        }
+      }
+
+      const force =
+        body.preparationHint === "force" || body.preparationHint === "force_prepare";
+
+      const defaultFps = IMPL === "musetalk" ? 25 : 30;
+      const fps = Number.isFinite(body.fps) ? body.fps : defaultFps;
+      const bboxShift = Number.isFinite(body.bboxShift) ? body.bboxShift : 0;
+
+      const prepKey = buildPrepKey({
+        avatarId: body.avatarId,
+        imagePngBase64: body.imagePngBase64,
+        fps,
+        bboxShift
+      });
+
+      const cacheHit = cache.has(prepKey) && !force;
+
+      const record = {
+        status: "queued",
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+        artifacts: null,
+        meta: {},
+        prepKey,
+        cacheHit
+      };
+
+      jobs.set(jobKey(body.jobId, body.clipId), record);
+      jobQueue.push(body);
+      startQueue();
+
+      return respondJson(res, 200, { accepted: true, prepKey, cacheHit });
+    }
+
+    const statusMatch = url.pathname.match(/^\/v1\/jobs\/([^/]+)\/([^/]+)\/status$/);
+    if (req.method === "GET" && statusMatch) {
+      const [, jobId, clipId] = statusMatch;
+      const record = jobs.get(jobKey(jobId, clipId));
+      if (!record) return respondJson(res, 404, { status: "failed", error: "not_found" });
+
+      const cacheHit = record.cacheHit ?? record.meta?.cacheHit ?? false;
+      const prepKey = record.prepKey ?? record.meta?.prepKey ?? null;
+
+      if (record.status === "failed") {
+        return respondJson(res, 200, {
+          status: "failed",
+          error: record.error,
+          createdAt: record.createdAt,
+          updatedAt: record.updatedAt,
+          cacheHit,
+          prepKey
+        });
+      }
+
+      return respondJson(res, 200, {
+        status: record.status,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+        cacheHit,
+        prepKey
+      });
+    }
+
+    const artifactsMatch = url.pathname.match(/^\/v1\/jobs\/([^/]+)\/([^/]+)\/artifacts$/);
+    if (req.method === "GET" && artifactsMatch) {
+      const [, jobId, clipId] = artifactsMatch;
+      const record = jobs.get(jobKey(jobId, clipId));
+      if (!record || record.status !== "succeeded") {
+        return respondJson(res, 404, { error: "not_ready" });
+      }
+
+      const cacheHit = record.cacheHit ?? record.meta?.cacheHit ?? false;
+      const prepKey = record.prepKey ?? record.meta?.prepKey ?? null;
+
+      return respondJson(res, 200, {
+        ...record.artifacts,
+        cacheHit,
+        prepKey
+      });
+    }
+
+    res.statusCode = 404;
+    res.end("not found");
+  } catch (err) {
+    respondJson(res, 500, { error: "server_error", message: String(err) });
+  }
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`[local-avatar] listening on ${PORT}`);
+});

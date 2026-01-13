@@ -1,0 +1,55 @@
+$ErrorActionPreference = "Stop"
+
+param(
+  [string]$EnvName = "MuseTalk"
+)
+
+$ErrorActionPreference = "Stop"
+
+function Invoke-Checked {
+  param(
+    [string]$FilePath,
+    [string[]]$Arguments,
+    [switch]$Capture
+  )
+  if ($Capture) {
+    $output = & $FilePath @Arguments
+    if ($LASTEXITCODE -ne 0) {
+      throw "Command failed: $FilePath $($Arguments -join ' ')"
+    }
+    return $output
+  }
+
+  & $FilePath @Arguments
+  if ($LASTEXITCODE -ne 0) {
+    throw "Command failed: $FilePath $($Arguments -join ' ')"
+  }
+}
+
+try {
+  $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+  $docsDir = Join-Path $repoRoot "docs"
+  New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
+
+  $envPath = Join-Path $docsDir "musetalk.env.yml"
+  $reqPath = Join-Path $docsDir "musetalk.requirements.txt"
+
+  $envExport = Invoke-Checked -FilePath "conda" -Arguments @(
+    "env", "export", "-n", $EnvName, "--no-builds"
+  ) -Capture
+  $envExport |
+    Where-Object { $_ -notmatch "^prefix:\s" } |
+    Set-Content -Path $envPath -Encoding ascii
+
+  $pipFreeze = Invoke-Checked -FilePath "conda" -Arguments @(
+    "run", "-n", $EnvName, "python", "-m", "pip", "freeze"
+  ) -Capture
+  $pipFreeze | Set-Content -Path $reqPath -Encoding ascii
+
+  Invoke-Checked -FilePath "conda" -Arguments @(
+    "run", "-n", $EnvName, "python", "-m", "pip", "check"
+  )
+} catch {
+  Write-Error $_
+  exit 1
+}
