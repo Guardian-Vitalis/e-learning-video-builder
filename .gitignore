@@ -12,3 +12,7 @@ apps/cloud/.artifacts/
 **/*.vtt
 **/*.srt
 
+
+# Local probes
+evb_probe_*.txt
+
