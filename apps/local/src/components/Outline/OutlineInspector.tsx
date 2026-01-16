@@ -1,9 +1,12 @@
 ﻿"use client";
 
+import { useEffect, useMemo, useState } from "react";
+import { useParams } from "next/navigation";
 import ScriptEditor from "../ScriptEditor";
 import InlineErrorBlock from "../ui/InlineErrorBlock";
 import SectionRenderPreview from "../Preview/SectionRenderPreview";
 import type { CleanupResult, DraftSection } from "@evb/shared";
+import { getCloudApiBaseUrl } from "../../api/cloud";
 
 
 type Props = {
@@ -56,9 +59,57 @@ type Props = {
   };
 };
 
-function countSentences(text: string) {
-  const matches = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g);
-  return matches ? matches.length : 0;
+const MAX_STATS_CHARS = 200000;
+const PREVIEW_LINE_LIMIT = 80;
+const PREVIEW_CHAR_LIMIT = 12000;
+
+function getScriptStats(text: string) {
+  const limit = Math.min(text.length, MAX_STATS_CHARS);
+  let words = 0;
+  let sentences = 0;
+  let inWord = false;
+  for (let i = 0; i < limit; i += 1) {
+    const ch = text[i];
+    const isWhitespace =
+      ch === " " || ch === "\n" || ch === "\r" || ch === "\t" || ch === "\f";
+    if (!isWhitespace && !inWord) {
+      words += 1;
+      inWord = true;
+    }
+    if (isWhitespace) {
+      inWord = false;
+    }
+    if (ch === "." || ch === "!" || ch === "?") {
+      sentences += 1;
+    }
+  }
+  const truncated = text.length > MAX_STATS_CHARS;
+  return { words, sentences, truncated };
+}
+
+function buildLinePreview(text: string) {
+  if (!text) {
+    return { preview: "", truncated: false };
+  }
+  let lines = 1;
+  let endIndex = 0;
+  for (let i = 0; i < text.length && i < PREVIEW_CHAR_LIMIT; i += 1) {
+    if (text[i] === "\n") {
+      lines += 1;
+      if (lines > PREVIEW_LINE_LIMIT) {
+        endIndex = i;
+        break;
+      }
+    }
+    endIndex = i + 1;
+  }
+  const truncated =
+    endIndex < text.length && (lines > PREVIEW_LINE_LIMIT || endIndex >= PREVIEW_CHAR_LIMIT);
+  return { preview: text.slice(0, endIndex), truncated };
+}
+
+function formatCount(value: number, truncated: boolean) {
+  return truncated ? `${value}+` : String(value);
 }
 
 export default function OutlineInspector({
@@ -91,20 +142,72 @@ export default function OutlineInspector({
   localAvatarPreview,
   scriptDiff
 }: Props) {
+  const params = useParams<{ id: string }>();
+  const [showDetails, setShowDetails] = useState(false);
+  const [showFullScript, setShowFullScript] = useState(false);
+  const [fullScriptLoading, setFullScriptLoading] = useState(false);
+  const [fullScriptLoaded, setFullScriptLoaded] = useState(false);
+  const [fullScriptError, setFullScriptError] = useState<string | null>(null);
+  const preview = draftText;
+  const stats = useMemo(() => getScriptStats(preview), [preview]);
+  const scriptPreview = useMemo(() => buildLinePreview(preview), [preview]);
+  const shouldAutoShowFull = !scriptPreview.truncated;
+  const hasSavedDraft = Boolean(scriptEditsByNodeId?.[section?.id ?? ""]);
+
+  useEffect(() => {
+    setShowDetails(false);
+    setShowFullScript(shouldAutoShowFull);
+    setFullScriptLoading(false);
+    setFullScriptLoaded(hasSavedDraft);
+    setFullScriptError(null);
+  }, [section?.id, shouldAutoShowFull, hasSavedDraft]);
+
   if (!section) {
     return <p className="text-sm text-slate-600">Select a section to inspect.</p>;
   }
 
-  const preview = draftText.trim();
   const isEnabled = outlineDisabledIds?.includes(section.id) ? false : true;
-  const wordCount = preview ? preview.split(/\s+/).filter(Boolean).length : 0;
-  const sentenceCount = preview ? countSentences(preview) : 0;
   const clipCount =
-    sentenceCount > 0
-      ? Math.max(1, Math.ceil(sentenceCount / Math.max(1, sentencesPerClip)))
+    stats.sentences > 0
+      ? Math.max(1, Math.ceil(stats.sentences / Math.max(1, sentencesPerClip)))
       : 1;
   const keyText = preview.length > 240 ? `${preview.slice(0, 240)}...` : preview;
-  const hasSavedDraft = Boolean(scriptEditsByNodeId?.[section.id]);
+  const loadFullScript = async () => {
+    if (!section || fullScriptLoading || fullScriptLoaded || hasSavedDraft) {
+      return;
+    }
+    setFullScriptLoading(true);
+    setFullScriptError(null);
+    try {
+      const baseUrl = getCloudApiBaseUrl();
+      const projectId = params?.id ?? "";
+      if (!projectId) {
+        throw new Error("missing_project_id");
+      }
+      const url = `${baseUrl}/v1/import/projects/${projectId}/sections/${section.id}/script`;
+      const res = await fetch(url);
+      const text = await res.text();
+      if (!res.ok) {
+        throw new Error(text || `status ${res.status}`);
+      }
+      const data = (text ? JSON.parse(text) : {}) as { text?: string };
+      const fullScript = data.text ?? "";
+      if (!fullScript) {
+        throw new Error("empty_script");
+      }
+      setFullScriptLoaded(true);
+      if (fullScript !== draftText) {
+        onSaveDraft(fullScript);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setFullScriptError(message);
+    } finally {
+      setFullScriptLoading(false);
+    }
+  };
+
+
 
   return (
     <div className="rounded-md border border-slate-200 bg-white p-3 text-sm text-slate-700">
@@ -144,8 +247,8 @@ export default function OutlineInspector({
       </div>
       <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-500">
         <span>{preview.length} chars</span>
-        <span>{wordCount} words</span>
-        <span>{sentenceCount} sentences</span>
+        <span>{formatCount(stats.words, stats.truncated)} words</span>
+        <span>{formatCount(stats.sentences, stats.truncated)} sentences</span>
       </div>
       {keyText && (
         <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
@@ -162,13 +265,59 @@ export default function OutlineInspector({
         </div>
       </div>
       {preview && (
-        <details className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+        <details
+          className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600"
+          open={showDetails}
+          onToggle={(event) => setShowDetails(event.currentTarget.open)}
+        >
           <summary className="cursor-pointer text-xs text-slate-500">
-            Script preview
+            Section details (lazy render)
           </summary>
-          <p className="mt-2 whitespace-pre-wrap">
-            {preview.length > 400 ? `${preview.slice(0, 400)}...` : preview}
-          </p>
+          {showDetails && (
+            <>
+              <div className="mt-2">
+                <p className="text-xs font-medium text-slate-600">
+                  Script preview (first {PREVIEW_LINE_LIMIT} lines)
+                </p>
+                <p className="mt-2 whitespace-pre-wrap">
+                  {scriptPreview.preview}
+                  {scriptPreview.truncated ? "..." : ""}
+                </p>
+                {!showFullScript && scriptPreview.truncated && (
+                  <button
+                    type="button"
+                    className="btn-ghost mt-2"
+                    onClick={() => {
+                      setShowFullScript(true);
+                      void loadFullScript();
+                    }}
+                    disabled={fullScriptLoading}
+                  >
+                    {fullScriptLoading ? "Loading full script..." : "Show full script editor"}
+                  </button>
+                )}
+              </div>
+              {fullScriptError && (
+                <div className="mt-2">
+                  <InlineErrorBlock
+                    message="Unable to load full script."
+                    details={fullScriptError}
+                  />
+                </div>
+              )}
+              {showFullScript && (!scriptPreview.truncated || fullScriptLoaded || hasSavedDraft) && (
+                <ScriptEditor
+                  section={{ ...section, script: draftText }}
+                  onChange={(value) => onDraftTextChange(value)}
+                  onCommit={(value) => onDraftTextChange(value)}
+                  isSaving={isDraftSaving}
+                  cleanupEnabled={cleanupEnabled}
+                  cleanupResult={cleanupResult}
+                  cleanupMode={cleanupMode}
+                />
+              )}
+            </>
+          )}
         </details>
       )}
       {isDraftDirty && (
@@ -226,7 +375,7 @@ export default function OutlineInspector({
           <p>Saved draft applied for this section.</p>
         </div>
       )}
-      {previewClips && (
+      {showDetails && previewClips && (
         <SectionRenderPreview
           clips={previewClips}
           previewJobId={previewJobId ?? null}
@@ -235,7 +384,7 @@ export default function OutlineInspector({
           localAvatarPreview={localAvatarPreview}
         />
       )}
-      {scriptDiff && (
+      {showDetails && scriptDiff && (
         <div className="mt-3 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
           <p className="text-xs font-medium text-slate-600">Diff since last approve</p>
           {scriptDiff.status === "loading" && (
@@ -262,15 +411,6 @@ export default function OutlineInspector({
           )}
         </div>
       )}
-      <ScriptEditor
-        section={{ ...section, script: draftText }}
-        onChange={(value) => onDraftTextChange(value)}
-        onCommit={(value) => onDraftTextChange(value)}
-        isSaving={isDraftSaving}
-        cleanupEnabled={cleanupEnabled}
-        cleanupResult={cleanupResult}
-        cleanupMode={cleanupMode}
-      />
     </div>
   );
 }

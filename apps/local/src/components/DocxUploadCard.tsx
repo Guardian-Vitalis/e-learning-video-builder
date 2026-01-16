@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { CourseVideoProject, DraftManifest } from "@evb/shared";
-import { CloudApiError, importDocx } from "../api/cloud";
 import { extractTableImages } from "../lib/parsing/docx/extractTableImages";
 import { putDocx } from "../lib/storage/docxStore";
 import { deleteTableImagesForProject, putTableImage } from "../lib/storage/tableImageStore";
@@ -21,17 +20,6 @@ type Props = {
 
 const DOCX_MIME =
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-
-function arrayBufferToBase64(buffer: ArrayBuffer) {
-  const bytes = new Uint8Array(buffer);
-  const chunkSize = 0x8000;
-  const chunks: string[] = [];
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const slice = bytes.subarray(i, i + chunkSize);
-    chunks.push(String.fromCharCode(...slice));
-  }
-  return btoa(chunks.join(""));
-}
 
 export default function DocxUploadCard({
   projectId,
@@ -88,6 +76,31 @@ export default function DocxUploadCard({
     setWarningTitle(null);
   };
 
+  const uploadDocx = async (file: File, projectIdValue: string) => {
+    const url = "/api/import/docx";
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("projectId", projectIdValue);
+    formData.append("filename", file.name);
+    const res = await fetch(url, { method: "POST", body: formData, credentials: "omit" });
+    const text = await res.text();
+    if (!res.ok) {
+      const error = new Error("upload_failed");
+      (error as { status?: number; body?: string }).status = res.status;
+      (error as { status?: number; body?: string }).body = text;
+      throw error;
+    }
+    return (text ? JSON.parse(text) : {}) as {
+      title?: string;
+      sections: Array<{
+        sectionId: string;
+        level: 1 | 2 | 3;
+        heading: string;
+        text: string;
+      }>;
+    };
+  };
+
   const handleUpload = async () => {
     if (!selectedFile) {
       setError("Please choose a .docx file to upload.");
@@ -107,30 +120,14 @@ export default function DocxUploadCard({
     setErrorTitle(null);
     setIsUploading(true);
 
-    if (!previewGeneratorUrl) {
-      setError(previewGeneratorHints.title);
-      setErrorTitle("Upload failed");
-      setErrorDetails(
-        [
-          "Preview generator (apps/cloud) must be running to parse DOCX.",
-          previewGeneratorHints.stepsText ?? previewGeneratorHints.details,
-          `Detected preview generator: ${previewGeneratorLabel} (source: ${previewGeneratorSource})`
-        ].join("\n")
-      );
-      setIsUploading(false);
-      return;
-    }
     try {
       await deleteTableImagesForProject(projectId);
       const docMeta = await putDocx(projectId, selectedFile);
-      const buffer = await selectedFile.arrayBuffer();
-      const importResult = await importDocx({
-        filename: selectedFile.name,
-        dataBase64: arrayBufferToBase64(buffer)
-      });
+      const importResult = await uploadDocx(selectedFile, projectId);
       if (importResult.sections.length === 0) {
         throw new Error("No sections found in docx.");
       }
+      const buffer = await selectedFile.arrayBuffer();
       const sections = importResult.sections.map((section) => ({
         id: section.sectionId,
         title: section.heading,
@@ -179,9 +176,48 @@ export default function DocxUploadCard({
       setWarningTitle(null);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (err instanceof CloudApiError) {
+      if (message.toLowerCase().includes("failed to fetch")) {
+        setError("Could not reach the preview generator.");
+        setErrorTitle("Upload failed");
+        setErrorDetails(
+          [
+            "Ensure apps/cloud is running on http://127.0.0.1:4000.",
+            `Original error: ${message}`
+          ].join("\n")
+        );
+        return;
+      }
+      const errWithStatus = err as { status?: number; body?: string };
+      if (errWithStatus.status && errWithStatus.body !== undefined) {
+        let parsed: { code?: string; message?: string; detail?: string; upstreamUrl?: string } =
+          {};
+        try {
+          parsed = JSON.parse(errWithStatus.body);
+        } catch {
+          parsed = {};
+        }
+        if (errWithStatus.status === 502 && parsed.code === "cloud_unreachable") {
+          setError("Could not reach the preview generator.");
+          setErrorTitle("Upload failed");
+          setErrorDetails(
+            [
+              "Ensure apps/cloud is running on http://127.0.0.1:4000.",
+              parsed.upstreamUrl ? `Upstream URL: ${parsed.upstreamUrl}` : null,
+              parsed.detail ? `Detail: ${parsed.detail}` : null
+            ]
+              .filter(Boolean)
+              .join("\n")
+          );
+          return;
+        }
+        if (errWithStatus.status === 400 && parsed.code === "missing_file") {
+          setError("Please choose a .docx file to upload.");
+          setErrorTitle("Upload failed");
+          setErrorDetails(parsed.message ?? null);
+          return;
+        }
         setError("Cloud failed to parse this DOCX.");
-        setErrorDetails(err.body || `status ${err.status}`);
+        setErrorDetails(parsed.message ?? errWithStatus.body ?? `status ${errWithStatus.status}`);
         setErrorTitle("Upload failed");
         return;
       }
