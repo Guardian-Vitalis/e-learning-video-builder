@@ -16,3 +16,9 @@ apps/cloud/.artifacts/
 # Local probes
 evb_probe_*.txt
 
+
+# Yarn Berry state
+.yarn/install-state.gz
+.pnp.*
+.yarn/unplugged/
+
