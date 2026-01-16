@@ -24,12 +24,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "${{ steps.nodever.outputs.version }}"
-          cache: "yarn"
       - name: Enable Corepack
         shell: bash
         run: |
           corepack enable
           corepack prepare yarn@3.6.1 --activate
+          corepack yarn --version
+          corepack yarn workspaces list --verbose
       - name: Versions
         shell: bash
         run: |
