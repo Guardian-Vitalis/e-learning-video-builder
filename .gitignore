@@ -21,4 +21,5 @@ evb_probe_*.txt
 .yarn/install-state.gz
 .pnp.*
 .yarn/unplugged/
+.yarn/cache/
 

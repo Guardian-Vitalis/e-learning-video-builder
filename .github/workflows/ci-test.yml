@@ -29,14 +29,11 @@ jobs:
         run: |
           corepack enable
           corepack prepare yarn@3.6.1 --activate
-          corepack yarn --version
-          corepack yarn workspaces list --verbose
       - name: Versions
         shell: bash
         run: |
           node -v
           corepack --version
-          corepack yarn --version
       - name: Enforce Yarn Berry
         shell: bash
         run: |
