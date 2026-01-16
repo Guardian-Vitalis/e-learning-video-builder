@@ -27,15 +27,31 @@ jobs:
           cache: "yarn"
       - name: Enable Corepack
         shell: bash
-        run: corepack enable
+        run: |
+          corepack enable
+          corepack prepare yarn@3.6.1 --activate
       - name: Versions
         shell: bash
         run: |
           node -v
-          yarn -v
+          corepack --version
+          corepack yarn --version
+      - name: Enforce Yarn Berry
+        shell: bash
+        run: |
+          yarn_major="$(corepack yarn --version | cut -d. -f1)"
+          if [ "$yarn_major" -lt 2 ]; then
+            echo "ERROR: Yarn Berry (>=2) is required. Found yarn $(corepack yarn --version)."
+            exit 1
+          fi
+      - name: Diagnostics before install
+        shell: bash
+        run: |
+          corepack yarn --version
+          corepack yarn workspaces list --verbose
       - name: Install dependencies
         shell: bash
-        run: yarn install --immutable || yarn install
+        run: corepack yarn install --immutable
       - name: Run tests
         shell: bash
-        run: yarn test:all
+        run: corepack yarn test:all
