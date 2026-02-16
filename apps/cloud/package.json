@@ -1,0 +1,37 @@
+{
+  "name": "@evb/cloud",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "yarn dev:api",
+    "dev:api": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "dev:worker": "ts-node-dev --respawn --transpile-only src/worker/index.ts",
+    "dev:noredis": "node scripts/dev-solo.mjs",
+    "dev:solo": "node scripts/dev-solo.mjs",
+    "test": "vitest",
+    "test:redis": "node scripts/test-redis.mjs",
+    "smoke:jobs": "ts-node-dev --transpile-only src/scripts/smokeJobs.ts",
+    "smoke:avatar": "node -r ts-node/register/transpile-only src/scripts/smokeAvatar.ts"
+  },
+  "dependencies": {
+    "@evb/shared": "workspace:*",
+    "bullmq": "^5.12.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ffmpeg-static": "^5.3.0",
+    "ioredis": "^5.4.1",
+    "jszip": "^3.10.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.12.12",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.5.4",
+    "vitest": "^1.6.0"
+  }
+}

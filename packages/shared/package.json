@@ -1,0 +1,17 @@
+{
+  "name": "@evb/shared",
+  "version": "0.0.0",
+  "private": true,
+  "main": "./index.cjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "require": "./index.cjs",
+      "default": "./index.cjs"
+    }
+  },
+  "scripts": {
+    "test": "node -e \"console.log('@evb/shared ok')\""
+  }
+}

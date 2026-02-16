@@ -1,0 +1,55 @@
+name: CI Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Resolve Node version
+        id: nodever
+        shell: bash
+        run: |
+          if [ -f .nvmrc ]; then
+            v="$(cat .nvmrc | tr -d '\r\n' | sed 's/^v//')"
+            echo "version=$v" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=20" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "${{ steps.nodever.outputs.version }}"
+      - name: Enable Corepack
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare yarn@3.6.1 --activate
+      - name: Versions
+        shell: bash
+        run: |
+          node -v
+          corepack --version
+      - name: Enforce Yarn Berry
+        shell: bash
+        run: |
+          yarn_major="$(corepack yarn --version | cut -d. -f1)"
+          if [ "$yarn_major" -lt 2 ]; then
+            echo "ERROR: Yarn Berry (>=2) is required. Found yarn $(corepack yarn --version)."
+            exit 1
+          fi
+      - name: Diagnostics before install
+        shell: bash
+        run: |
+          corepack yarn --version
+          corepack yarn workspaces list --verbose
+      - name: Install dependencies
+        shell: bash
+        run: corepack yarn install --immutable
+      - name: Run tests
+        shell: bash
+        run: corepack yarn test:all

@@ -1,0 +1,29 @@
+{
+  "name": "evb",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"yarn dev:local\" \"yarn dev:cloud:api\" \"yarn dev:cloud:worker\"",
+    "dev:demo": "node scripts/dev-demo.mjs",
+    "dev:demo:redis": "node scripts/dev-demo-redis.mjs",
+    "dev:demo:direct": "node scripts/dev-demo.mjs",
+    "dev:local": "yarn workspace @evb/local dev",
+    "dev:cloud": "yarn dev:cloud:api",
+    "dev:cloud:api": "yarn workspace @evb/cloud dev:api",
+    "dev:cloud:worker": "yarn workspace @evb/cloud dev:worker",
+    "diagnose:windows": "node scripts/diagnose-windows-lockdown.mjs",
+    "ticket:windows": "node scripts/print-windows-lockdown-ticket.mjs",
+    "test:all": "yarn workspace @evb/local test:unit && yarn workspace @evb/cloud test && yarn workspace @evb/local-avatar-engine test && yarn workspace @evb/shared test",
+    "test:unit:local": "node scripts/preflight-windows-tests.mjs && node scripts/run-local-tests.mjs",
+    "test:shared": "node ./scripts/test-shared.mjs",
+    "test:shared:watch": "node ./scripts/test-shared.mjs --watch"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "cross-env": "^10.1.0"
+  },
+  "packageManager": "yarn@3.6.1"
+}

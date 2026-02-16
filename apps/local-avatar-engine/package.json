@@ -1,0 +1,17 @@
+{
+  "name": "@evb/local-avatar-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node src/server.js",
+    "start": "node src/server.js",
+    "test": "node test/run-tests.js",
+    "doctor": "node scripts/doctor.mjs",
+    "install:musetalk-deps": "powershell -ExecutionPolicy Bypass -File scripts/install-musetalk-deps.ps1",
+    "setup:musetalk": "powershell -ExecutionPolicy Bypass -File scripts/install-musetalk-deps.ps1"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}
