@@ -1,3 +1,3 @@
-[submodule ""MuseTalk""]
+[submodule "MuseTalk"]
     path = MuseTalk
     url = https://github.com/TMElyralab/MuseTalk.git
