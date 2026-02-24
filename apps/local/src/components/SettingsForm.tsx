@@ -32,9 +32,19 @@ export default function SettingsForm({
   const [saved, setSaved] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
-  const avatarPresets = AVATAR_PRESETS ?? [];
-  const voicePresets = VOICE_PRESETS ?? [];
-  const stylePresets = STYLE_PRESETS ?? [];
+  const FALLBACK_AVATAR_PRESETS = [
+    { id: "local_musetalk", name: "MuseTalk (local)" },
+    { id: "stub", name: "Stub (fast)" }
+  ];
+  const FALLBACK_VOICE_PRESETS = [{ id: "stub_voice", name: "Stub voice" }];
+  const FALLBACK_STYLE_PRESETS = [{ id: "neutral", name: "Neutral" }];
+
+  const avatarPresets =
+    AVATAR_PRESETS && AVATAR_PRESETS.length > 0 ? AVATAR_PRESETS : FALLBACK_AVATAR_PRESETS;
+  const voicePresets =
+    VOICE_PRESETS && VOICE_PRESETS.length > 0 ? VOICE_PRESETS : FALLBACK_VOICE_PRESETS;
+  const stylePresets =
+    STYLE_PRESETS && STYLE_PRESETS.length > 0 ? STYLE_PRESETS : FALLBACK_STYLE_PRESETS;
   const findPresetById = <T extends { id: string }>(presets: T[], id?: string) =>
     id ? presets.find((p) => p.id === id) : undefined;
   const selectedAvatar = findPresetById(avatarPresets, settings.avatarPresetId);
