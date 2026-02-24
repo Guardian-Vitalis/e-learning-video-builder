@@ -7,10 +7,7 @@ import {
   OutputMode,
   AVATAR_PRESETS,
   VOICE_PRESETS,
-  STYLE_PRESETS,
-  getAvatarPreset,
-  getVoicePreset,
-  getStylePreset
+  STYLE_PRESETS
 } from "@evb/shared";
 import { setGenerationSettings, ValidationError } from "../lib/storage/projectsStore";
 import SaveStatus from "./ui/SaveStatus";
@@ -38,6 +35,11 @@ export default function SettingsForm({
   const avatarPresets = AVATAR_PRESETS ?? [];
   const voicePresets = VOICE_PRESETS ?? [];
   const stylePresets = STYLE_PRESETS ?? [];
+  const findPresetById = <T extends { id: string }>(presets: T[], id?: string) =>
+    id ? presets.find((p) => p.id === id) : undefined;
+  const selectedAvatar = findPresetById(avatarPresets, settings.avatarPresetId);
+  const selectedVoice = findPresetById(voicePresets, settings.voicePresetId);
+  const selectedStyle = findPresetById(stylePresets, settings.stylePresetId);
 
   const update = <K extends keyof GenerationSettings>(
     key: K,
@@ -130,7 +132,7 @@ export default function SettingsForm({
           value={settings.avatarPresetId}
           onChange={(event) => update("avatarPresetId", event.target.value)}
         >
-          {!getAvatarPreset(settings.avatarPresetId) && settings.avatarPresetId && (
+          {!selectedAvatar && settings.avatarPresetId && (
             <option value={settings.avatarPresetId}>
               Unknown preset ({settings.avatarPresetId})
             </option>
@@ -162,7 +164,7 @@ export default function SettingsForm({
           value={settings.voicePresetId}
           onChange={(event) => update("voicePresetId", event.target.value)}
         >
-          {!getVoicePreset(settings.voicePresetId) && settings.voicePresetId && (
+          {!selectedVoice && settings.voicePresetId && (
             <option value={settings.voicePresetId}>
               Unknown preset ({settings.voicePresetId})
             </option>
@@ -194,7 +196,7 @@ export default function SettingsForm({
           value={settings.stylePresetId}
           onChange={(event) => update("stylePresetId", event.target.value)}
         >
-          {!getStylePreset(settings.stylePresetId) && settings.stylePresetId && (
+          {!selectedStyle && settings.stylePresetId && (
             <option value={settings.stylePresetId}>
               Unknown preset ({settings.stylePresetId})
             </option>
