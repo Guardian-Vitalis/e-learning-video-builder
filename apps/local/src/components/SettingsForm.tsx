@@ -35,6 +35,10 @@ export default function SettingsForm({
   const [saved, setSaved] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const avatarPresets = AVATAR_PRESETS ?? [];
+  const voicePresets = VOICE_PRESETS ?? [];
+  const stylePresets = STYLE_PRESETS ?? [];
+
   const update = <K extends keyof GenerationSettings>(
     key: K,
     value: GenerationSettings[K]
@@ -51,11 +55,11 @@ export default function SettingsForm({
     setSaveState("saving");
     try {
       const avatarPresetId =
-        settings.avatarPresetId || (AVATAR_PRESETS[0]?.id ?? "");
+        settings.avatarPresetId || (avatarPresets?.[0]?.id ?? "");
       const voicePresetId =
-        settings.voicePresetId || (VOICE_PRESETS[0]?.id ?? "");
+        settings.voicePresetId || (voicePresets?.[0]?.id ?? "");
       const stylePresetId =
-        settings.stylePresetId || (STYLE_PRESETS[0]?.id ?? "");
+        settings.stylePresetId || (stylePresets?.[0]?.id ?? "");
 
       setGenerationSettings(projectId, {
         outputMode: settings.outputMode,
@@ -131,11 +135,17 @@ export default function SettingsForm({
               Unknown preset ({settings.avatarPresetId})
             </option>
           )}
-          {AVATAR_PRESETS.map((preset) => (
-            <option key={preset.id} value={preset.id}>
-              {preset.name}
+          {avatarPresets.length === 0 ? (
+            <option value="" disabled>
+              (loading presets)
             </option>
-          ))}
+          ) : (
+            avatarPresets.map((preset) => (
+              <option key={preset.id} value={preset.id}>
+                {preset.name}
+              </option>
+            ))
+          )}
         </select>
         <p className="helper-text">Choose which avatar engine renders the clips.</p>
         {fieldErrors?.avatarPresetId && (
@@ -157,11 +167,17 @@ export default function SettingsForm({
               Unknown preset ({settings.voicePresetId})
             </option>
           )}
-          {VOICE_PRESETS.map((preset) => (
-            <option key={preset.id} value={preset.id}>
-              {preset.name}
+          {voicePresets.length === 0 ? (
+            <option value="" disabled>
+              (loading presets)
             </option>
-          ))}
+          ) : (
+            voicePresets.map((preset) => (
+              <option key={preset.id} value={preset.id}>
+                {preset.name}
+              </option>
+            ))
+          )}
         </select>
         <p className="helper-text">MVP presets are stubbed; IDs map to providers later.</p>
         {fieldErrors?.voicePresetId && (
@@ -183,11 +199,17 @@ export default function SettingsForm({
               Unknown preset ({settings.stylePresetId})
             </option>
           )}
-          {STYLE_PRESETS.map((preset) => (
-            <option key={preset.id} value={preset.id}>
-              {preset.name}
+          {stylePresets.length === 0 ? (
+            <option value="" disabled>
+              (loading presets)
             </option>
-          ))}
+          ) : (
+            stylePresets.map((preset) => (
+              <option key={preset.id} value={preset.id}>
+                {preset.name}
+              </option>
+            ))
+          )}
         </select>
         <p className="helper-text">MVP presets are stubbed; IDs map to providers later.</p>
         {fieldErrors?.stylePresetId && (
